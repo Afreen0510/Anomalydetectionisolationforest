@@ -1,0 +1,104 @@
+name: ec2-log-anomaly
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.19.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports: ["127.0.0.1:9200:9200"]
+    volumes: ["elastic-data:/usr/share/elasticsearch/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=3s"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+  kafka:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    volumes: ["kafka-data:/tmp/kraft-combined-logs"]
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+  topic-init:
+    image: apache/kafka:3.9.1
+    depends_on:
+      kafka: {condition: service_healthy}
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command: ["--bootstrap-server", "kafka:9092", "--create", "--if-not-exists", "--topic", "application-logs", "--partitions", "1", "--replication-factor", "1"]
+  app:
+    build: .
+    command: ["python", "demo.py", "serve"]
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["app-logs:/logs"]
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.19.0
+    user: root
+    command: ["-e", "--strict.perms=false"]
+    depends_on:
+      topic-init: {condition: service_completed_successfully}
+    volumes:
+      - "./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro"
+      - "app-logs:/logs:ro"
+      - "filebeat-data:/usr/share/filebeat/data"
+  index-init:
+    build: .
+    command: ["python", "pipeline.py", "init"]
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.19.0
+    environment:
+      LS_JAVA_OPTS: "-Xms512m -Xmx512m"
+      QUEUE_TYPE: persisted
+      API_HTTP_HOST: 0.0.0.0
+    depends_on:
+      topic-init: {condition: service_completed_successfully}
+      index-init: {condition: service_completed_successfully}
+    volumes:
+      - "./config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro"
+      - "logstash-data:/usr/share/logstash/data"
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.19.0
+    depends_on:
+      elasticsearch: {condition: service_healthy}
+    environment:
+      ELASTICSEARCH_HOSTS: '["http://elasticsearch:9200"]'
+    ports: ["127.0.0.1:5601:5601"]
+  trainer:
+    build: .
+    command: ["python", "pipeline.py", "train"]
+    volumes: ["./data:/historical:ro", "model-data:/model"]
+  scorer:
+    build: .
+    command: ["python", "pipeline.py", "score", "--watch"]
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SNS_TOPIC_ARN: ${SNS_TOPIC_ARN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
+    depends_on:
+      index-init: {condition: service_completed_successfully}
+    volumes: ["model-data:/model:ro"]
+    restart: on-failure
+volumes:
+  elastic-data:
+  kafka-data:
+  app-logs:
+  filebeat-data:
+  logstash-data:
+  model-data:
