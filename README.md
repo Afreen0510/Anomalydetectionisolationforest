@@ -70,3 +70,9 @@ git push -u origin main
 GitHub Actions starts Compose, imports the dashboard, and checks a fresh batch through Elasticsearch and the scorer. It runs without SNS credentials.
 
 Use `docker compose down` to stop the stack while retaining data. `docker compose down --volumes` deletes all demo indices, Kafka data, local logs, Kibana state, and the trained model.
+## Project Members
+
+| GitHub Profile | Role |
+|---|---|
+| [Afreen0510](https://github.com/Afreen0510) | Project Owner & Developer |
+| [Nazia0611](https://github.com/Nazia0611) | Project Collaborator |
